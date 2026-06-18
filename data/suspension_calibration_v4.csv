@@ -1,0 +1,5 @@
+ordinal,car,spring_unit,front_spring_min,front_spring_max,rear_spring_min,rear_spring_max,front_height_min_cm,front_height_max_cm,rear_height_min_cm,rear_height_max_cm,source
+2574,Warthog,kgf/mm,23.5,117.3,23.5,117.3,42.0,50.0,42.0,50.0,screenshot kgf/mm
+1200,Audi R8 LMS,kgf/mm,56.7,283.5,56.7,283.5,4.6,9.6,6.5,11.5,screenshot kgf/mm
+2371,Ferrari FXX K,kgf/mm,52.4,261.9,52.4,261.9,8.8,13.8,8.0,13.0,screenshot kgf/mm
+3400,Formula Drift #99 Mazda RX-8,kgf/mm,5.237742,26.124421,3.382299,26.124421,13.4,18.4,13.4,18.4,screenshot lb/in converted
