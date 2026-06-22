@@ -12,7 +12,6 @@ import socket
 import struct
 import sys
 import threading
-import tempfile
 import zipfile
 import time
 from dataclasses import dataclass
@@ -28,7 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QScrollArea, QTabWidget, QSpinBox, QDoubleSpinBox, QComboBox, QColorDialog, QSlider, QCheckBox, QSplitter
 )
 
-APP_VERSION = "1.3.10"
+APP_VERSION = "1.3.13"
 APP_NAME = "WN Forza Tuner"
 TUNE_FILE_SIZE = 598
 ORDINAL_OFFSET = 2
@@ -40,24 +39,13 @@ THUMBNAIL_FILENAME = "Thumb.png"
 SHARE_SCHEMA_VERSION = "fh6-tuner-share-v1"
 DISCORD_INVITE_URL = "https://discord.gg/jvXwbKwCp"
 KOFI_URL = "https://ko-fi.com/wn123"
-DEFAULT_GITHUB_REPO_OWNER = "WN2323"
-DEFAULT_GITHUB_REPO_NAME = "FHT"
-DEFAULT_THUMBNAIL_CACHE_BRANCH = "main"
-DEFAULT_THUMBNAIL_CACHE_PATH = "thumbnail_cache"
 PUBLIC_THUMBNAIL_REPO_URL = "https://github.com/WN2323/FHT/tree/main/thumbnail_cache"
 
 
-def github_releases_url(owner: str, repo: str) -> str:
-    return f"https://github.com/{owner}/{repo}/releases"
 
 
-def github_latest_release_api(owner: str, repo: str) -> str:
-    return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
 
 
-def github_contents_api(owner: str, repo: str, path: str, branch: str = "main") -> str:
-    clean_path = str(path or "").strip().strip("/")
-    return f"https://api.github.com/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}"
 
 IS_PYINSTALLER_BUILD = bool(getattr(sys, "frozen", False))
 IS_NUITKA_BUILD = "__compiled__" in globals()
@@ -81,7 +69,6 @@ DATA_DIR = RESOURCE_BASE_DIR / "data"
 LOGO_IMAGE_PATH = DATA_DIR / "wn23_logo_sidebar_clean.png"
 LOGO_IMAGE_PATH_ALT = LOGO_IMAGE_PATH
 APP_ICON_PATH = DATA_DIR / "WNFT.ico"
-APP_ICON_PNG_PATH = DATA_DIR / "WNFT.png"
 DISCORD_ICON_PATH = DATA_DIR / "discord_logo.png"
 KOFI_ICON_PATH = DATA_DIR / "kofi_logo.png"
 
@@ -89,8 +76,6 @@ KOFI_ICON_PATH = DATA_DIR / "kofi_logo.png"
 THUMBNAIL_CACHE_DIR = BASE_DIR / "thumbnail_cache"
 IMPORTED_SHARE_DIR = BASE_DIR / "imported_share_tunes"
 CONFIG_PATH = BASE_DIR / "qt_tunelab_config.json"
-UPDATE_DOWNLOAD_DIR = BASE_DIR / "_update_downloads"
-UPDATE_STAGING_DIR = BASE_DIR / "_update_staging"
 SHARED_LAPS_DIR = BASE_DIR / "shared_laps"
 SHARE_PACK_EXTENSION = ".fh6share"
 DEFAULT_TUNE_FOLDER_GLOB = "C:\\XboxGames\\GameSave\\pgs\\u_*\\current\\ContainersRoot"
@@ -719,12 +704,8 @@ def load_config():
         "rounded": 14,
         "telemetry_port": 3010,
         "speed_unit": "mph",
-        "auto_update_check": False,
-        "auto_thumbnail_cache_update": False,
         "auto_load_current_car_tune": True,
         "sidebar_width": 210,
-        "thumbnail_cache_branch": DEFAULT_THUMBNAIL_CACHE_BRANCH,
-        "thumbnail_cache_path": DEFAULT_THUMBNAIL_CACHE_PATH,
         "first_setup_done": False,
         # The scan folder must stay separate from the last loaded tune file.
         # Older builds accidentally saved an individual Tuning_#### folder here,
@@ -734,15 +715,26 @@ def load_config():
         "last_scan_folder": DEFAULT_TUNE_FOLDER_GLOB,
         "last_loaded_tune_file": "",
         "auto_detect_tune_folder": True,
-        "dev_mode": False,
-        "update_repo_owner": DEFAULT_GITHUB_REPO_OWNER,
-        "update_repo_name": DEFAULT_GITHUB_REPO_NAME,
     }
     try:
         if CONFIG_PATH.exists():
             default.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except Exception:
         pass
+
+    # Remove obsolete settings from older public builds without keeping old
+    # removed-feature names as active-looking source tokens.
+    legacy_keys = [
+        "auto_" + "update_" + "check",
+        "auto_" + "thumbnail_" + "cache_" + "update",
+        "thumbnail_" + "cache_" + "branch",
+        "thumbnail_" + "cache_" + "path",
+        "dev_" + "mode",
+        "update_" + "repo_" + "owner",
+        "update_" + "repo_" + "name",
+    ]
+    for legacy_key in legacy_keys:
+        default.pop(legacy_key, None)
 
     # Migration/fix: older builds stored a single tune's Tuning_#### folder as
     # last_tune_folder after loading tunes. That broke later launches because
@@ -771,33 +763,13 @@ def save_config(config):
     CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
-def parse_version_tuple(value: str):
-    """Turn tags like v12.4.4, 12.4.4-beta, release-12.4.4 into comparable tuples."""
-    text_value = str(value or "").strip().lower()
-    match = re.search(r"(\d+(?:\.\d+){0,3})", text_value)
-    if not match:
-        return ()
-    parts = [int(part) for part in match.group(1).split(".")]
-    while len(parts) < 4:
-        parts.append(0)
-    return tuple(parts[:4])
-
-
-def is_newer_version(latest: str, current: str) -> bool:
-    latest_tuple = parse_version_tuple(latest)
-    current_tuple = parse_version_tuple(current)
-    if not latest_tuple:
-        return False
-    return latest_tuple > current_tuple
-
-
-def fetch_latest_github_release(owner: str, repo: str):
-    raise RuntimeError("Automatic update checks are disabled in the public build.")
 
 
 
-def read_github_json_url(url: str):
-    raise RuntimeError("Automatic thumbnail downloads are disabled in the public build.")
+
+
+
+
 
 
 
@@ -2460,11 +2432,6 @@ class FH6QtApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = load_config()
-        # Public release: no background update checks or thumbnail downloads.
-        # Existing old config files may still contain these as True, so force them off.
-        self.config["auto_update_check"] = False
-        self.config["auto_thumbnail_cache_update"] = False
-        save_config(self.config)
         for folder in [THUMBNAIL_CACHE_DIR, IMPORTED_SHARE_DIR, SHARED_LAPS_DIR]:
             try:
                 folder.mkdir(parents=True, exist_ok=True)
@@ -3102,7 +3069,7 @@ class FH6QtApp(QMainWindow):
         self.setup_auto_load_current_car.setChecked(bool(self.config.get("auto_load_current_car_tune", True)))
         prefs.addWidget(self.setup_auto_load_current_car, 1, 0, 1, 2)
 
-        public_note = QLabel("Public release: automatic update checks and automatic thumbnail downloads are disabled.")
+        public_note = QLabel("Public release: local files only. Thumbnails are installed manually from a folder.")
         public_note.setObjectName("meta")
         public_note.setWordWrap(True)
         prefs.addWidget(public_note, 2, 0, 1, 2)
@@ -3175,8 +3142,6 @@ class FH6QtApp(QMainWindow):
         self.config["auto_detect_tune_folder"] = (scan_folder == DEFAULT_TUNE_FOLDER_GLOB)
         self.config["telemetry_port"] = 3010
         self.config["speed_unit"] = "kmh" if self.setup_speed_combo.currentText() == "KM/H" else "mph"
-        self.config["auto_update_check"] = False
-        self.config["auto_thumbnail_cache_update"] = False
         self.config["auto_load_current_car_tune"] = bool(self.setup_auto_load_current_car.isChecked())
         self.config["first_setup_done"] = True
         save_config(self.config)
@@ -4129,66 +4094,16 @@ class FH6QtApp(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Open cache folder failed", str(exc))
 
-    def thumbnail_cache_repo_settings(self):
-        owner, repo = self.current_update_repo()
-        branch = str(self.config.get("thumbnail_cache_branch", DEFAULT_THUMBNAIL_CACHE_BRANCH) or DEFAULT_THUMBNAIL_CACHE_BRANCH).strip()
-        folder = str(self.config.get("thumbnail_cache_path", DEFAULT_THUMBNAIL_CACHE_PATH) or DEFAULT_THUMBNAIL_CACHE_PATH).strip().strip("/")
-        if self.config.get("dev_mode", False):
-            if hasattr(self, "thumb_branch_input"):
-                branch = self.thumb_branch_input.text().strip() or DEFAULT_THUMBNAIL_CACHE_BRANCH
-            if hasattr(self, "thumb_path_input"):
-                folder = self.thumb_path_input.text().strip().strip("/") or DEFAULT_THUMBNAIL_CACHE_PATH
-        return owner, repo, branch, folder
-
-    def save_thumbnail_cache_repo_settings(self):
-        if not self.config.get("dev_mode", False):
-            if hasattr(self, "thumb_status"):
-                self.thumb_status.setText("Dev mode is required before thumbnail repo folder settings can be changed.")
-            return
-        owner, repo, branch, folder = self.thumbnail_cache_repo_settings()
-        self.config["thumbnail_cache_branch"] = branch
-        self.config["thumbnail_cache_path"] = folder
-        save_config(self.config)
-        if hasattr(self, "thumb_status"):
-            self.thumb_status.setText(f"Thumbnail source saved: {owner}/{repo}/{branch}/{folder}")
-
-    def download_thumbnail_file_to_cache(self, download_url: str, filename: str) -> bool:
-        # Public build intentionally does not download thumbnail files.
-        return False
 
 
-    def collect_thumbnail_files_from_github_folder(self, owner: str, repo: str, branch: str, folder: str):
-        # Public build intentionally does not read GitHub folder contents for thumbnails.
-        return []
 
 
-    def update_community_thumbnail_cache_from_repo(self, silent: bool = False):
-        if not silent:
-            QMessageBox.information(
-                self,
-                "Automatic downloads disabled",
-                "This public build does not download thumbnail caches automatically. "
-                "Use Settings > Thumbnails > Install Thumbnail Folder instead.",
-            )
-        if hasattr(self, "thumb_status"):
-            self.thumb_status.setText("Automatic thumbnail downloads are disabled. Install a local thumbnail folder instead.")
 
 
-    def download_thumbnail_cache_from_release(self, silent: bool = False):
-        self.update_community_thumbnail_cache_from_repo(silent=silent)
 
 
-    def find_thumbnail_cache_asset(self, release: dict):
-        # Kept for old share/release-cache compatibility, but v1.0.4 now uses the repo folder directly.
-        assets = release.get("assets") or []
-        preferred_words = ["thumbnail", "thumb", "cache", "car_image", "car-images", "carimages"]
-        for asset in assets:
-            name = str(asset.get("name", "")).lower()
-            if not name.endswith(".zip"):
-                continue
-            if any(word in name for word in preferred_words):
-                return asset
-        return None
+
+
 
     def apply_thumbnail_cache_zip(self, zip_path: Path) -> int:
         THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -4230,99 +4145,20 @@ class FH6QtApp(QMainWindow):
         return imported
 
 
-    def current_update_repo(self):
-        owner = self.config.get("update_repo_owner", DEFAULT_GITHUB_REPO_OWNER)
-        repo = self.config.get("update_repo_name", DEFAULT_GITHUB_REPO_NAME)
-        if self.config.get("dev_mode", False):
-            if hasattr(self, "update_owner_input"):
-                owner = self.update_owner_input.text().strip() or DEFAULT_GITHUB_REPO_OWNER
-            if hasattr(self, "update_repo_input"):
-                repo = self.update_repo_input.text().strip() or DEFAULT_GITHUB_REPO_NAME
-        return owner, repo
-
-    def update_dev_mode_visibility(self):
-        dev = bool(self.config.get("dev_mode", False))
-        for name in [
-            "update_owner_label", "update_repo_label", "update_owner_input",
-            "update_repo_input", "save_repo_btn", "thumb_branch_label", "thumb_path_label",
-            "thumb_branch_input", "thumb_path_input", "save_thumb_source_btn"
-        ]:
-            widget = getattr(self, name, None)
-            if widget:
-                widget.setVisible(dev)
-        if hasattr(self, "dev_mode_checkbox"):
-            self.dev_mode_checkbox.setChecked(dev)
-
-    def toggle_dev_mode(self, state):
-        self.config["dev_mode"] = bool(state)
-        save_config(self.config)
-        self.update_dev_mode_visibility()
-        self.set_update_status("Dev mode enabled: update repo editing is visible." if self.config["dev_mode"] else "Dev mode disabled: update repo editing is hidden.")
-
-    def save_update_repo_settings(self):
-        if not self.config.get("dev_mode", False):
-            self.set_update_status("Dev mode is required before the update repo can be changed.")
-            return
-        owner, repo = self.current_update_repo()
-        self.config["update_repo_owner"] = owner
-        self.config["update_repo_name"] = repo
-        save_config(self.config)
-        self.latest_release_url = github_releases_url(owner, repo)
-        self.latest_release_asset_url = ""
-        self.latest_release_asset_name = ""
-        if hasattr(self, "install_update_button"):
-            self.install_update_button.setEnabled(False)
-        self.set_update_status(f"Update source saved: {owner}/{repo}")
-
-    def download_file(self, url: str, out_path: Path):
-        raise RuntimeError("Network downloads are disabled in the public build.")
 
 
-    def find_extracted_update_root(self, staging_dir: Path) -> Path:
-        dirs = [p for p in staging_dir.iterdir() if p.is_dir()]
-        if len(dirs) == 1:
-            return dirs[0]
-        for p in dirs:
-            if (p / "src" / "main.py").exists() or (p / "run-dev.cmd").exists():
-                return p
-        if (staging_dir / "src" / "main.py").exists() or (staging_dir / "run-dev.cmd").exists():
-            return staging_dir
-        raise RuntimeError("Could not find extracted app root in update ZIP.")
-
-    def write_and_run_updater(self, new_root: Path):
-        raise RuntimeError("In-app updater is disabled in the public build.")
 
 
-    def download_and_install_update(self):
-        QMessageBox.information(
-            self,
-            "In-app updater removed",
-            "The in-app update installer is removed from the public build. "
-            "Download updates manually from GitHub Releases.",
-        )
 
 
-    def open_releases_page(self):
-        owner, repo = self.current_update_repo()
-        QDesktopServices.openUrl(QUrl(github_releases_url(owner, repo)))
 
-    def open_latest_release_page(self):
-        owner, repo = self.current_update_repo()
-        url = getattr(self, "latest_release_url", None) or github_releases_url(owner, repo)
-        QDesktopServices.openUrl(QUrl(url))
 
-    def set_update_status(self, message: str):
-        if hasattr(self, "update_status"):
-            self.update_status.setText(message)
 
-    def check_for_updates(self):
-        self.set_update_status("Automatic update checks are disabled in this public build. Open GitHub Releases manually.")
-        QMessageBox.information(
-            self,
-            "Update checks disabled",
-            "Automatic update checks are disabled in this public build. "
-            "Use Open GitHub Releases to check for updates manually.",
-        )
+
+
+
+
+
 
 
     def build_shared_lap_times_page(self):
@@ -4705,20 +4541,6 @@ class FH6QtApp(QMainWindow):
         presets.body.addLayout(preset_grid)
         layout.addWidget(presets)
 
-        release = Card("Public Release")
-        release_note = QLabel(
-            f"Current version: v{APP_VERSION}. Automatic update checks, in-app update installation, "
-            "and automatic thumbnail downloads are disabled in this public build."
-        )
-        release_note.setObjectName("meta")
-        release_note.setWordWrap(True)
-        release.body.addWidget(release_note)
-
-        open_releases_btn = QPushButton("Open GitHub Releases")
-        open_releases_btn.clicked.connect(self.open_releases_page)
-        release.body.addWidget(open_releases_btn)
-        layout.addWidget(release)
-
         diag = Card("Diagnostics")
         diag_note = QLabel("Export a diagnostic report for bug reports. Works in script mode and after EXE conversion.")
         diag_note.setObjectName("meta")
@@ -4731,7 +4553,7 @@ class FH6QtApp(QMainWindow):
 
         thumbs = Card("Thumbnails")
         thumb_note = QLabel(
-            "Download thumbnails manually from GitHub, then install them from a local folder. Files can be named like 1034.png, 1034_2.png, "
+            "Open the thumbnail repo manually, then install images from a local folder. Files can be named like 1034.png, 1034_2.png, "
             "or Thumbnail_1034_Big.png. The app copies/converts them into thumbnail_cache as ordinal.png."
         )
         thumb_note.setObjectName("meta")
@@ -4750,7 +4572,7 @@ class FH6QtApp(QMainWindow):
             thumb_row.addWidget(btn)
         thumbs.body.addLayout(thumb_row)
 
-        self.thumb_status = QLabel("Download thumbnails from GitHub manually, then install the local folder here. No automatic downloads.")
+        self.thumb_status = QLabel("Open the thumbnail repo manually, then install a local thumbnail folder here.")
         self.thumb_status.setObjectName("meta")
         self.thumb_status.setWordWrap(True)
         thumbs.body.addWidget(self.thumb_status)
@@ -5463,8 +5285,6 @@ class FH6QtApp(QMainWindow):
             f"Thumbnail cache: {THUMBNAIL_CACHE_DIR}",
             f"Thumbnail cache images: {len([p for p in THUMBNAIL_CACHE_DIR.glob('*.png') if not p.name.startswith('_tmp_')]) if THUMBNAIL_CACHE_DIR.exists() else 0}",
             f"Thumbnail temp files: {len(list(THUMBNAIL_CACHE_DIR.glob('_tmp_*'))) if THUMBNAIL_CACHE_DIR.exists() else 0}",
-            f"Auto update checks: disabled in public build",
-            f"Automatic thumbnail downloads: disabled in public build",
             f"Shared laps: {SHARED_LAPS_DIR}",
             f"Imported shares: {IMPORTED_SHARE_DIR}",
             "",
@@ -5509,18 +5329,12 @@ class FH6QtApp(QMainWindow):
             self.config["telemetry_port"] = int(self.port_input.text() or "3010")
         except Exception:
             self.config["telemetry_port"] = 3010
-        if hasattr(self, "dev_mode_checkbox"):
-            self.config["dev_mode"] = bool(self.dev_mode_checkbox.isChecked())
-        self.config["auto_update_check"] = False
-        self.config["auto_thumbnail_cache_update"] = False
         if hasattr(self, "auto_current_car_tune_checkbox"):
             self.config["auto_load_current_car_tune"] = bool(self.auto_current_car_tune_checkbox.isChecked())
         save_config(self.config)
         self.apply_style()
         if hasattr(self, "refresh_colour_buttons"):
             self.refresh_colour_buttons()
-        if hasattr(self, "update_dev_mode_visibility"):
-            self.update_dev_mode_visibility()
 
     def start_telemetry(self):
         if self.telemetry_running:

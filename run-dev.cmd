@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-echo Starting WN Forza Tuner v1.3.10...
+echo Starting WN Forza Tuner v1.3.13...
 
 set "PYTHON_CMD="
 
